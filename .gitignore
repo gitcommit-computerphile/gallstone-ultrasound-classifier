@@ -1,0 +1,36 @@
+# data directories
+dataset/
+ultrasound/
+reports/
+processed/
+stage1/
+stage2/
+stage3/
+unique_sizes/
+fan_masks/
+
+# manifest and annotations (contain PHI)
+manifest.csv
+Unique Image Outlines*.json
+
+# model outputs
+checkpoints/
+results_*.json
+
+# python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+env/
+gallstone_env/
+.env
+*.egg-info/
+
+# jupyter
+.ipynb_checkpoints/
+
+# os
+.DS_Store
+Thumbs.db
