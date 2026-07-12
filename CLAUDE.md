@@ -295,6 +295,55 @@ Both models trained on the original 95 frames (83 stones, 12 normal), 59 patient
 
 **Threshold note:** at threshold 0.5, sensitivity is low (model outputs low probabilities for stones due to 6.9× normal loss weighting in the old run). With the balanced new dataset, threshold 0.5 should be more reliable.
 
+## EfficientNet results (2026-07-12, post-expansion)
+
+Trained on expanded dataset: 194 frames, 136 patients, ~1:1 class balance. Patient-level 70/15/15 split. Two-phase training: frozen backbone 30 epochs + unfreeze last 2 blocks 15 epochs (lr=1e-4).
+
+| Metric | Mixed split | GD → CH | CH → GD |
+|---|---|---|---|
+| AUC-ROC | 1.0000 | 0.4691 | 0.3250 |
+| Sensitivity | 0.6429 | 0.0000 | 0.0000 |
+| Specificity | 1.0000 | 0.9114 | 1.0000 |
+| Spec@Sens≥0.90 | 1.0000 | 0.0633 | 0.2500 |
+| F1 | 0.7826 | 0.0000 | 0.0000 |
+| Accuracy ⚠️ | 0.8077 | 0.7579 | 0.0625 |
+
+Test set sizes: mixed (stones=14, normal=12), GD→CH (stones=16, normal=79), CH→GD (stones=60, normal=4).
+
+**Mixed split AUC=1.0 is not trustworthy** — test set is only 26 samples. Val AUC plateaued at ~0.77–0.79 throughout training, which is the more honest generalisation signal.
+
+**Cross-site failure is total** — sensitivity=0 in both directions at threshold 0.5. The model learned hospital style, not anatomy:
+- GD images are 95% stones visually → model maps "GD style" to stones
+- CH images are 81% normal visually → model maps "CH style" to normal
+- Tested cross-site, probabilities are inverted relative to labels (GD→CH AUC < 0.5)
+
+**Root cause: data imbalance per site.** GD cross-site train had only 3 normal patients; CH cross-site train had only 18 stone patients. No model can generalise cross-site from this distribution.
+
+## DINOv2 results (2026-07-12, post-expansion)
+
+Same dataset and split as EfficientNet above. Phase 1 only (frozen backbone, 30 epochs) — no fine-tuning phase.
+
+| Metric | Mixed split | GD → CH | CH → GD |
+|---|---|---|---|
+| AUC-ROC | 0.9583 | 0.5676 | 0.3958 |
+| Sensitivity | 0.2857 | 0.7500 | 0.2167 |
+| Specificity | 1.0000 | 0.4177 | 0.7500 |
+| Spec@Sens≥0.90 | 0.9167 | 0.0886 | 0.0000 |
+| F1 | 0.4444 | 0.3243 | 0.3514 |
+| Accuracy ⚠️ | 0.6154 | 0.4737 | 0.2500 |
+
+Test set sizes: mixed (stones=14, normal=12), GD→CH (stones=16, normal=79), CH→GD (stones=60, normal=4).
+
+**DINOv2 is the better model overall:**
+- Val AUC rose steadily to 0.88 and plateaued (vs EfficientNet's 0.77–0.79 plateau) — healthier training curve
+- GD→CH AUC 0.568 vs EfficientNet 0.469 — above random vs below random; sensitivity 0.750 vs 0.000
+- CH→GD AUC 0.396 vs EfficientNet 0.325 — both fail, DINOv2 slightly less so
+- Frozen ViT backbone does not memorise machine-specific patterns the way EfficientNet's fine-tuned blocks do
+
+**Mixed split sensitivity 0.286 is a threshold artefact, not a model failure.** DINOv2 outputs conservative probabilities; threshold 0.5 is too high. Spec@Sens≥0.90 = 0.917 means at the right threshold the model catches 90% of stones while clearing 91.7% of normals — the best clinical number in either run.
+
+**CH→GD val AUC peaked at 0.80 (epoch 11) then fell to 0.69** — overfitting. The model found a Chughtai-specific pattern that doesn't transfer to Gulab Devi. More GD normal cases remain the critical fix.
+
 ## Open tasks (next stages)
 
 1. ~~**Chughtai text strip removal**~~ — **done**, output in `stage1/` (top 14% + right 20% crop, verified visually).
