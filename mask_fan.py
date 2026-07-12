@@ -127,7 +127,7 @@ def main(preview: bool, preview_file: str | None):
         cv2.imwrite(str(dst), result)
         processed += 1
 
-    print(f"\nDone. Processed {processed} frames → {STAGE3}")
+    print(f"\nDone. Processed {processed} frames -> {STAGE3}")
 
 
 if __name__ == "__main__":

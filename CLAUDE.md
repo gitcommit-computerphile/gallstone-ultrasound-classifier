@@ -19,6 +19,50 @@ A curated medical imaging dataset for binary gallstone classification (stones vs
 | `is_duplicate` / `dup_of` | near-identical frames flagged by perceptual hash; drop from val/test, keep in train |
 | `finding_summary` | raw text from the radiology report (Gulab Devi only) |
 
+## How labels were assigned
+
+- **Chughtai Lab** — pre-sorted by the lab into `Gb normal` / `Gb stones` folders. The folder name is the label.
+- **Gulab Devi Teaching Hospital** — sorted by date/patient, not by diagnosis. Each patient folder usually contains a phone photo of the typed radiology report (`reports/`). Every report was read and the gallbladder finding transcribed into `finding_summary` in the manifest. That finding is the label.
+- Folders with no report photo are labelled `unknown` unless the folder name explicitly said "normal gb".
+
+## Stage 0 — Data preparation (before any training)
+
+Full methodology in `docs/STAGE0_METHODS.md`. Three steps:
+
+### 0.1 — GB-frame filtering
+Raw folders are whole-abdomen studies (kidney, liver, spleen, bladder, etc.). All 139 frames were reviewed visually on contact sheets. Chughtai frames are dual-pane with organ names burned in — read directly. Gulab Devi frames are single-pane — confirmed by morphology. Result: 107 GB-containing frames kept, 32 dropped (`gb_view` column).
+
+**Dual-pane detection:** 6 Gulab Devi frames were incorrectly assumed single-pane. Caught by objective test: if `crop_width / original_width ≥ 0.80`, the crop spans two fans. Those 6 were reclassified `gb_dual` and re-cropped to the right pane.
+
+### 0.2 — Sector crop + de-identification (`processed/`)
+Every frame has PHI burned in (patient name, MRN, date). Method: grayscale threshold → morphological open/close → largest connected component (the fan) → crop to its bounding box. For `gb_dual` frames, right half isolated first. Output: `processed/`, one PNG per GB frame.
+
+**Limitation:** in-fan measurement calipers survive this step — they sit inside the fan boundary and can't be removed by cropping. Fixed in Stages 1–2.
+
+### 0.3 — De-duplication
+DCT-based perceptual hash (32×32 → 8×8 DCT, 64-bit) computed per frame. Within each patient, frames within Hamming distance ≤ 6 are flagged as near-duplicates (`is_duplicate = yes`, `dup_of` names the kept twin). **Flagged, not deleted** — 21 duplicates, all in the stones class. Result: 86 unique GB frames.
+
+**Stage 0 counts:**
+
+| stage | frames |
+|-------|-------:|
+| Raw ultrasound | 139 |
+| GB-containing (after 0.1) | 107 |
+| Unique GB (after 0.3) | 86 |
+
+## Site distribution (binary set)
+
+After ingesting `new_dataset_12_july/` (2026-07-12):
+
+| | Chughtai | Gulab Devi |
+|---|---|---|
+| normal | 90 (96%) | 4 (4%) |
+| stones | 21 (21%) | 79 (79%) |
+
+**Total: 194 frames · 136 patients · 100 stones · 94 normal** (159 non-duplicate).
+
+The site confound persists but is reduced on the stones side: Chughtai now contributes 21 stone patients (was 3). Normal is still almost entirely Chughtai. Cross-site validation remains mandatory.
+
 ## Which data to use
 
 - **Train on `stage3/`** — cleanest version: text strips removed, calipers inpainted, fan-masked (everything outside the ultrasound dome blacked out).
@@ -26,7 +70,7 @@ A curated medical imaging dataset for binary gallstone classification (stones vs
 - `stage1/` = Chughtai text strips removed only (intermediate, kept for reference).
 - `processed/` = Stage 0 output, untouched (kept for reference).
 - **Do not train on `ultrasound/`** — raw BMPs/TIFs that include kidney/liver/other-organ frames and burned-in PHI.
-- **Binary task filter**: `label IN ('stones', 'normal')` → 95 frames, 59 patients.
+- **Binary task filter**: `label IN ('stones', 'normal')` → 194 frames, 136 patients (159 non-duplicate).
 - `sludge` and `unknown` are excluded from binary classification by default.
 
 ## Splitting and duplication strategy
@@ -66,11 +110,7 @@ Apply augmentation only to `stage3/` PNGs at training time (never to val/test).
 - Large rotations (>15°) — introduces black corners from the fan crop boundary
 - Color jitter / channel operations — images are grayscale
 
-**Class imbalance via augmentation:** apply 6–7 augmented variants per normal frame vs 1–2 per stone frame. Combine with weighted loss (`class_weight ≈ {stones: 1, normal: 6.9}`).
-
-**Why heavier augmentation on normal:** The normal class has only 12 unique frames across 11 patients — roughly 6.9× fewer than stones (83 frames, 48 patients). Without rebalancing, the model sees stones far more often per epoch and learns to predict stones by default, regardless of anatomy. Generating 6–7 variants per normal frame brings the effective per-epoch count closer to parity with stones.
-
-**Why weighted loss on top of augmentation:** Augmentation increases data volume but doesn't change the loss signal weighting. A weighted loss (`class_weight ≈ {stones: 1, normal: 6.9}`) tells the model that a mistake on a normal frame costs 6.9× more than a mistake on a stone frame — directly counteracting the imbalance at the gradient level. The weight is derived from the inverse class frequency: 83 stone frames / 12 normal frames ≈ 6.9. Using both together addresses imbalance from two angles: data volume (augmentation) and optimization pressure (weighted loss).
+**Class imbalance:** after the 2026-07-12 ingestion the dataset is near-balanced (100 stones vs 94 normal ≈ 1.06:1). Standard uniform augmentation and equal loss weighting are appropriate. The old 6.9:1 ratio and the heavy per-class augmentation strategy no longer apply — do not use `class_weight = {stones: 1, normal: 6.9}` with this dataset.
 
 ## Preprocessing pipeline
 
@@ -174,7 +214,7 @@ Key flags: `--epochs` (default 30), `--lr` (default 1e-3), `--batch-size` (defau
 
 ## Model strategy
 
-Only 95 frames exist. The entire strategy flows from this — overfitting is the real problem, not architecture choice.
+194 frames exist (159 non-duplicate). Overfitting is still the primary risk — do not train from scratch.
 
 **The core idea:** use a large pretrained model as a frozen feature extractor. Only the small classifier head trains. This way, the backbone's weights (learned from millions of images) stay intact, and there are very few parameters left to overfit on 95 frames.
 
@@ -197,7 +237,7 @@ head = nn.Linear(384, 1)                 # only this trains
 
 **What to avoid:**
 - Training any model from scratch — needs 10k+ images minimum
-- Fine-tuning large backbones fully (ResNet-50+, full ViT) — too many free parameters for 95 frames
+- Fine-tuning large backbones fully (ResNet-50+, full ViT) — too many free parameters for 194 frames
 - Reporting only mixed-split AUC — must also run cross-site validation (Chughtai → Gulab Devi and vice versa)
 - Trusting high AUC before caliper leakage is fixed — the model may be reading calipers, not anatomy
 
@@ -211,7 +251,7 @@ head = nn.Linear(384, 1)                 # only this trains
 
 **Also report (with disclaimer):**
 - **F1 score** — handles imbalance better than accuracy but is threshold-dependent; use it as a secondary check, not a headline number.
-- **Accuracy** — reported for completeness only. ⚠️ With 83 stones vs 12 normal frames, a model that always predicts "stones" scores 87.4% accuracy while being clinically useless. Do not use accuracy to compare models or claim performance.
+- **Accuracy** — reported for completeness only. With the expanded dataset (100 stones vs 94 normal) a "always stones" baseline scores 51.5% — accuracy is now a meaningful signal, but AUC remains the primary metric.
 
 **Minimum reporting table:**
 
@@ -229,9 +269,9 @@ The cross-site columns are what reveal whether the model generalised to anatomy 
 
 1. **Patient-level splits** — `patient_id` must not appear in more than one of train/val/test. Some names recur across dates (e.g. two "Abdullah", two "Panzi").
 2. **Caliper leakage** — addressed in `stage2/` via OpenCV inpainting. Verify post-training with GradCAM — if activations fire on caliper locations, fall back to manual masking.
-3. **Class imbalance** — 83 stone frames vs 12 normal frames (≈6.9:1). Augmentation or weighted loss required.
-4. **Site confound** — Chughtai ≈ normal-heavy, Gulab Devi ≈ stones-heavy. Cross-site validation splits are important.
-5. **PHI** — `ultrasound/` and `reports/` contain patient names, MRNs, dates. Do not share externally without de-identification.
+3. **Class imbalance** — 100 stones vs 94 normal (≈1.06:1 after 2026-07-12 ingestion). No special rebalancing needed. If retraining on the original smaller dataset, use `class_weight ≈ {stones: 1, normal: 6.9}`.
+4. **Site confound** — see site distribution table above. Cross-site validation splits are mandatory, not optional.
+5. **PHI** — `ultrasound/`, `reports/`, and `manifest.csv` contain patient names, MRNs, dates. Do not share externally without de-identification. All are gitignored.
 
 ## File naming convention
 
@@ -239,9 +279,9 @@ The cross-site columns are what reveal whether the model generalised to anatomy 
 
 Chughtai has no scan date: `ch_arshad_01.bmp`. Report photos: `<src>_<date>_<patient>_report.<ext>`.
 
-## Baseline results (2026-06-21)
+## Baseline results (2026-06-21, pre-expansion)
 
-Both models trained on 95 frames (83 stones, 12 normal), 59 patients, patient-level 70/15/15 split.
+Both models trained on the original 95 frames (83 stones, 12 normal), 59 patients, patient-level 70/15/15 split. **These results are on the old smaller dataset — retrain after the 2026-07-12 ingestion.**
 
 | Metric | EfficientNet | DINOv2 |
 |---|---|---|
@@ -251,19 +291,20 @@ Both models trained on 95 frames (83 stones, 12 normal), 59 patients, patient-le
 
 **DINOv2 is the better model** — 0.94 mixed AUC with a clean training curve (val AUC rose steadily 0.45 → 1.0 over 30 epochs).
 
-**Cross-site results are weak for both models** — this is a data problem, not a model problem. Gulab Devi has only 3 normal patients (4 frames); Chughtai has only 3 stone patients (4 frames). Neither site has enough of the minority class to train or evaluate cross-site properly.
+**Cross-site results are weak for both models** — this is a data problem, not a model problem. Gulab Devi has only 3 normal patients (4 frames); Chughtai had only 3 stone patients (now 21 after expansion). The CH→GD direction should improve with retraining.
 
-**Threshold note:** at threshold 0.5, sensitivity is low (model outputs low probabilities for stones due to 6.9× normal loss weighting). Use Spec@Sens≥90 as the clinical operating point — DINOv2 achieves specificity 0.50 at 90% sensitivity on the mixed split.
+**Threshold note:** at threshold 0.5, sensitivity is low (model outputs low probabilities for stones due to 6.9× normal loss weighting in the old run). With the balanced new dataset, threshold 0.5 should be more reliable.
 
 ## Open tasks (next stages)
 
 1. ~~**Chughtai text strip removal**~~ — **done**, output in `stage1/` (top 14% + right 20% crop, verified visually).
 2. ~~**Caliper / text overlay removal**~~ — **done**, output in `stage2/` (OpenCV HSV inpainting on all frames — calipers on stones, GB label + depth numbers on normals).
-3. ~~**Fan masking**~~ — **done**, 28 polygons annotated in VIA, masks in `fan_masks/`, output in `stage3/`.
+3. ~~**Fan masking**~~ — **done**, 28 polygons annotated in VIA, masks in `fan_masks/`, output in `stage3/`. New frames use automatic contour detection via `mask_fan.py`.
 4. ~~**Training code**~~ — **done**, `dataset.py` / `train.py` / `evaluate.py`; runs both models + cross-site evaluation.
 5. ~~**Windows path fix**~~ — **done**, `dataset.py` patched to replace `\\` → `/` in `processed_relpath` before `Path.relative_to()`.
-6. ~~**Baseline training run**~~ — **done**, EfficientNet AUC 0.83, DINOv2 AUC 0.94 on mixed split (2026-06-21).
-7. **More normal cases from Gulab Devi** — only 3 normal patients; cross-site GD→CH is random (AUC 0.50) until this is fixed. Target: 15–20 more normal GD scans.
-8. **More stone cases from Chughtai** — only 3 stone patients; target: 10–15 more.
-9. **GradCAM verification** — confirm model attends to GB anatomy, not residual artefacts.
-10. **Label unknown patients** — 7 patients have no radiology report; sourcing reports would add ~9 frames.
+6. ~~**Baseline training run**~~ — **done**, EfficientNet AUC 0.83, DINOv2 AUC 0.94 on mixed split (2026-06-21). Pre-expansion dataset only.
+7. ~~**More stone cases from Chughtai**~~ — **done** (2026-07-12), 21 Chughtai stone patients now (was 3). Run `ingest_new_dataset.py` to see how new data was added.
+8. **Retrain on expanded dataset** — 194 frames, 136 patients, ~1:1 class balance. Expected improvement in CH→GD cross-site AUC.
+9. **More normal cases from Gulab Devi** — still only 3 normal GD patients (4 frames); GD→CH cross-site AUC will remain weak until this is fixed. Target: 15–20 more normal GD scans.
+10. **GradCAM verification** — confirm model attends to GB anatomy, not residual artefacts.
+11. **Label unknown patients** — 7 patients have no radiology report; sourcing reports would add ~9 frames.

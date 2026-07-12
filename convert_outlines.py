@@ -1,7 +1,7 @@
 """
-Convert VIA polygon annotations → binary mask PNGs in fan_masks/.
+Convert VIA polygon annotations to binary mask PNGs in fan_masks/.
 
-Reads:  "Unique Image Outlines (3).json"  (VGG Image Annotator format)
+Reads:  all "Unique Image Outlines*.json" files in the project root
 Writes: fan_masks/mask_{W}x{H}.png  (white = fan, black = outside)
 
 Run: python convert_outlines.py
@@ -13,40 +13,54 @@ import cv2
 from pathlib import Path
 
 ROOT      = Path(__file__).parent
-JSON_FILE = ROOT / "Unique Image Outlines (3).json"
 MASKS_DIR = ROOT / "fan_masks"
 
 MASKS_DIR.mkdir(exist_ok=True)
 
-with open(JSON_FILE) as f:
-    data = json.load(f)
+json_files = sorted(ROOT.glob("Unique Image Outlines*.json"))
+if not json_files:
+    print("No 'Unique Image Outlines*.json' files found.")
+    raise SystemExit(1)
 
-img_metadata = data["_via_img_metadata"]
+print(f"Found {len(json_files)} annotation file(s):")
+for jf in json_files:
+    print(f"  {jf.name}")
+print()
+
 saved = 0
+skipped = 0
 
-for entry in img_metadata.values():
-    filename = entry["filename"]          # e.g. "221x194__gd_2025-10-02_safia_01.png"
-    regions  = entry["regions"]
+for json_file in json_files:
+    with open(json_file) as f:
+        data = json.load(f)
 
-    # parse W x H from filename prefix
-    size_str = filename.split("__")[0]    # "221x194"
-    w, h     = map(int, size_str.split("x"))
+    img_metadata = data["_via_img_metadata"]
 
-    if not regions:
-        print(f"  WARN: no polygon for {filename} — skipped")
-        continue
+    for entry in img_metadata.values():
+        filename = entry["filename"]
+        regions  = entry["regions"]
 
-    sa  = regions[0]["shape_attributes"]
-    xs  = sa["all_points_x"]
-    ys  = sa["all_points_y"]
-    pts = np.array(list(zip(xs, ys)), dtype=np.int32)
+        # handles "472x574__ch_name.png", "frame_472x574.png", "472x574.png"
+        size_str = filename.split("__")[0]
+        size_str = size_str.replace("frame_", "").replace(".png", "")
+        w, h     = map(int, size_str.split("x"))
 
-    mask = np.zeros((h, w), dtype=np.uint8)
-    cv2.fillPoly(mask, [pts], 255)
+        if not regions:
+            print(f"  WARN: no polygon for {filename} -- skipped")
+            skipped += 1
+            continue
 
-    out = MASKS_DIR / f"mask_{w}x{h}.png"
-    cv2.imwrite(str(out), mask)
-    print(f"  {w}x{h}  →  {out.name}")
-    saved += 1
+        sa  = regions[0]["shape_attributes"]
+        xs  = sa["all_points_x"]
+        ys  = sa["all_points_y"]
+        pts = np.array(list(zip(xs, ys)), dtype=np.int32)
 
-print(f"\nDone. {saved}/{len(img_metadata)} masks saved to {MASKS_DIR}/")
+        mask = np.zeros((h, w), dtype=np.uint8)
+        cv2.fillPoly(mask, [pts], 255)
+
+        out = MASKS_DIR / f"mask_{w}x{h}.png"
+        cv2.imwrite(str(out), mask)
+        print(f"  {w}x{h}  ->  {out.name}")
+        saved += 1
+
+print(f"\nDone. {saved} masks saved, {skipped} skipped -> {MASKS_DIR}/")
