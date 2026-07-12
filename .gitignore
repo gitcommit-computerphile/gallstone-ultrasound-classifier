@@ -12,6 +12,7 @@ fan_masks/
 
 # manifest and annotations (contain PHI)
 manifest.csv
+README.md
 Unique Image Outlines*.json
 
 # model outputs
