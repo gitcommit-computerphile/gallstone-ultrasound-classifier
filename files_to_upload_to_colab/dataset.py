@@ -65,7 +65,7 @@ class GallstoneDataset(Dataset):
     def __getitem__(self, idx):
         row   = self.records.iloc[idx]
         # processed_relpath: "processed/stones/file.png" → stage3/stones/file.png
-        rel   = Path(row["processed_relpath"]).relative_to("processed")
+        rel   = Path(row["processed_relpath"].replace("\\", "/")).relative_to("processed")
         img   = Image.open(self.root / rel).convert("RGB")
         label = LABEL_MAP[row["label"]]
         return self.transform(img), torch.tensor(label, dtype=torch.float32)
@@ -84,7 +84,7 @@ def load_binary_frames(manifest_path: str | Path, stage3_root: str | Path) -> pd
 
     stage3_root = Path(stage3_root)
     exists = binary["processed_relpath"].apply(
-        lambda p: (stage3_root / Path(p).relative_to("processed")).exists()
+        lambda p: (stage3_root / Path(p.replace("\\", "/")).relative_to("processed")).exists()
     )
     n_missing = int((~exists).sum())
     if n_missing:
