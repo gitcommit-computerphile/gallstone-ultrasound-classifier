@@ -208,7 +208,7 @@ Three files implement the full pipeline:
 !python train.py --model dinov2       --data-root /path/to/gallstone_dataset
 ```
 
-Key flags: `--epochs` (default 30), `--lr` (default 1e-3), `--batch-size` (default 16), `--seed` (default 42), `--num-workers` (set to 0 on Windows if DataLoader errors).
+Key flags: `--epochs` (default 50), `--lr` (default 1e-3), `--batch-size` (default 16), `--seed` (default 42), `--num-workers` (set to 0 on Windows if DataLoader errors).
 
 **Known issue — Windows path separators in manifest.csv:** `processed_relpath` values use `\` (e.g. `processed\normal\ch_adnan_03.png`). On Linux/Colab, `Path(...).relative_to("processed")` fails. Fix: call `.replace("\\", "/")` on the relpath string before passing to `Path`. Both occurrences in `dataset.py` (file-exists check and `__getitem__`) need this fix.
 
@@ -321,7 +321,7 @@ Test set sizes: mixed (stones=14, normal=12), GD→CH (stones=16, normal=79), CH
 
 ## DINOv2 results (2026-07-12, post-expansion)
 
-Same dataset and split as EfficientNet above. Phase 1 only (frozen backbone, 30 epochs) — no fine-tuning phase.
+Same dataset and split as EfficientNet above. Phase 1 only (frozen backbone, 30 epochs) — no fine-tuning phase. **These results are pre-improvement — see improvements applied below.**
 
 | Metric | Mixed split | GD → CH | CH → GD |
 |---|---|---|---|
@@ -344,6 +344,51 @@ Test set sizes: mixed (stones=14, normal=12), GD→CH (stones=16, normal=79), CH
 
 **CH→GD val AUC peaked at 0.80 (epoch 11) then fell to 0.69** — overfitting. The model found a Chughtai-specific pattern that doesn't transfer to Gulab Devi. More GD normal cases remain the critical fix.
 
+## DINOv2 improved results (2026-07-12, post-improvement)
+
+Same dataset and split. Frozen backbone, 50 epochs. Improvements: CLASS_WEIGHTS 6.9→1.0, Gaussian noise augmentation, optimal threshold from val set.
+
+| Metric | Mixed split | GD → CH | CH → GD |
+|---|---|---|---|
+| AUC-ROC | 0.9524 | 0.4747 | 0.3583 |
+| Sensitivity @0.50 | 0.7857 | 0.8750 | 0.7833 |
+| Specificity @0.50 | 1.0000 | 0.1646 | 0.0000 |
+| Spec@Sens≥0.90 | 1.0000 | 0.0633 | 0.0000 |
+| F1 @0.50 | 0.8800 | 0.2917 | 0.8468 |
+| Accuracy @0.50 | 0.8846 | 0.2842 | 0.7344 |
+| Optimal threshold | 0.2344 | 0.2863 | 0.4391 |
+| Sensitivity @opt | 0.9286 | 1.0000 | 0.8500 |
+| Specificity @opt | 0.5000 | 0.0506 | 0.0000 |
+| F1 @opt | 0.7879 | 0.2991 | 0.8870 |
+| Accuracy @opt | 0.7308 | 0.2105 | 0.7969 |
+
+Test set sizes: mixed (stones=14, normal=12), GD→CH (stones=16, normal=79), CH→GD (stones=60, normal=4).
+
+**CLASS_WEIGHTS fix was the biggest win** — mixed split sensitivity jumped from 0.286 → 0.786 at threshold 0.5. Model calibration corrected; threshold 0.5 now works.
+
+**Optimal threshold (0.234) gives best clinical result** — sensitivity 0.929, specificity 0.500 on mixed split. Catches 13/14 stones while misclassifying 6/12 normals. Clinically acceptable: a missed stone is far more dangerous than a false alarm.
+
+**50 epochs was too many** — val AUC peaked at epoch 7–8 (0.8615) then slowly declined to 0.7846. Best checkpoint correctly restored. Next run: reduce to 20 epochs or add early stopping with patience=5.
+
+**GD→CH got slightly worse** (0.475 vs 0.568 pre-improvement) — CLASS_WEIGHTS change shifted probability distributions. Root cause unchanged: only 3 normal GD training patients. At opt threshold sensitivity=1.0 but specificity=0.051 — catches every stone but false-alarms on almost all normals.
+
+**CH→GD sensitivity improved** (0.783 vs 0.217) but AUC still below random (0.358). Specificity=0.000 — all 4 normals misclassified as stones. Data problem, not model problem.
+
+## DINOv2 improvements applied (2026-07-12)
+
+Three changes made to address the threshold and training issues above. Retrain with these in place before recording new results.
+
+**1. Optimal threshold from val set** (`train.py` + `evaluate.py`)
+After Phase 1 training, val predictions are used to find the threshold where sensitivity ≥ 0.90. Test metrics are now reported at both threshold=0.5 and the optimal threshold. Results table shows `@0.50` and `@opt` rows side by side. The mixed split Spec@Sens≥0.90 = 0.917 suggests the optimal threshold will transform sensitivity from 0.286 → ~0.90 with minimal specificity loss.
+
+**2. More epochs** (`train.py`)
+Default increased from 30 → 50 epochs. Val AUC had not converged at epoch 30 (still at 0.84–0.88 range). **Update after retraining:** val AUC peaked at epoch 7–8 and declined — 50 epochs is too many. Reduce default to 20 or add early stopping with patience=5.
+
+**3. Gaussian noise augmentation** (`dataset.py`)
+Added `AddGaussianNoise(std=0.02)` after `Normalize` in the augment pipeline. Simulates realistic ultrasound speckle noise. Applied to train only, not val/test.
+
+**Also fixed:** `CLASS_WEIGHTS` in `dataset.py` corrected from `{normal: 6.9}` to `{normal: 1.0}` — the 6.9 ratio was from the old 83:12 imbalanced dataset and no longer applies.
+
 ## Open tasks (next stages)
 
 1. ~~**Chughtai text strip removal**~~ — **done**, output in `stage1/` (top 14% + right 20% crop, verified visually).
@@ -353,7 +398,7 @@ Test set sizes: mixed (stones=14, normal=12), GD→CH (stones=16, normal=79), CH
 5. ~~**Windows path fix**~~ — **done**, `dataset.py` patched to replace `\\` → `/` in `processed_relpath` before `Path.relative_to()`.
 6. ~~**Baseline training run**~~ — **done**, EfficientNet AUC 0.83, DINOv2 AUC 0.94 on mixed split (2026-06-21). Pre-expansion dataset only.
 7. ~~**More stone cases from Chughtai**~~ — **done** (2026-07-12), 21 Chughtai stone patients now (was 3). Run `ingest_new_dataset.py` to see how new data was added.
-8. **Retrain on expanded dataset** — 194 frames, 136 patients, ~1:1 class balance. Expected improvement in CH→GD cross-site AUC.
+8. ~~**Retrain on expanded dataset**~~ — **done** (2026-07-12). EfficientNet + DINOv2 both trained; improved DINOv2 results recorded. Best mixed split: AUC 0.952, sensitivity 0.929 at optimal threshold 0.234.
 9. **More normal cases from Gulab Devi** — still only 3 normal GD patients (4 frames); GD→CH cross-site AUC will remain weak until this is fixed. Target: 15–20 more normal GD scans.
 10. **GradCAM verification** — confirm model attends to GB anatomy, not residual artefacts.
 11. **Label unknown patients** — 7 patients have no radiology report; sourcing reports would add ~9 frames.

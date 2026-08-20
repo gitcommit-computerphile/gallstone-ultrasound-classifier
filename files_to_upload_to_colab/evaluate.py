@@ -7,10 +7,29 @@ Label convention: stones=1 (positive/disease), normal=0 (negative).
 import numpy as np
 
 
+def find_optimal_threshold(
+    y_true: np.ndarray,
+    y_prob: np.ndarray,
+    sens_target: float = 0.90,
+) -> float:
+    """Return the threshold where sensitivity first reaches sens_target on this set."""
+    from sklearn.metrics import roc_curve
+    y_true = np.asarray(y_true, dtype=int)
+    y_prob = np.asarray(y_prob, dtype=float)
+    if len(np.unique(y_true)) < 2:
+        return 0.5
+    _, tpr, thresholds = roc_curve(y_true, y_prob, pos_label=1)
+    idx = int(np.searchsorted(tpr, sens_target))
+    if idx >= len(thresholds):
+        return float(thresholds[-1])
+    return float(thresholds[idx])
+
+
 def compute_metrics(
     y_true: np.ndarray,
     y_prob: np.ndarray,
     sens_target: float = 0.90,
+    threshold: float = 0.5,
 ) -> dict:
     """
     Compute AUC-ROC plus sensitivity/specificity/F1/accuracy at threshold 0.5,
@@ -51,7 +70,7 @@ def compute_metrics(
             "acc":  round(float(accuracy_score(y_true, pred)), 4),
         }
 
-    m_05 = _metrics_at(0.5)
+    m_05 = _metrics_at(threshold)
 
     # find threshold where sensitivity >= sens_target
     fpr, tpr, thresholds = roc_curve(y_true, y_prob, pos_label=1)
@@ -74,12 +93,17 @@ def print_results_table(results: dict):
     splits = ["mixed_split", "gd_to_ch", "ch_to_gd"]
     labels = ["Mixed split", "GD → CH", "CH → GD"]
     metrics = [
-        ("auc",          "AUC-ROC"),
-        ("sens",         "Sensitivity"),
-        ("spec",         "Specificity"),
-        ("spec_at_sens90", "Spec@Sens≥0.90"),
-        ("f1",           "F1"),
-        ("acc",          "Accuracy ⚠️"),
+        ("auc",            "AUC-ROC"),
+        ("sens",           "Sensitivity @0.50"),
+        ("spec",           "Specificity @0.50"),
+        ("spec_at_sens90", "Spec@Sens>=0.90"),
+        ("f1",             "F1 @0.50"),
+        ("acc",            "Accuracy @0.50"),
+        ("opt_threshold",  "Optimal threshold"),
+        ("opt_sens",       "Sensitivity @opt"),
+        ("opt_spec",       "Specificity @opt"),
+        ("opt_f1",         "F1 @opt"),
+        ("opt_acc",        "Accuracy @opt"),
     ]
 
     col_w = 14

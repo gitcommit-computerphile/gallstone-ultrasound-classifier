@@ -14,8 +14,8 @@ import torchvision.transforms as T
 
 LABEL_MAP = {"stones": 1, "normal": 0}
 
-# normal frames cost 6.9x more in the loss (inverse class frequency: 83/12 ≈ 6.9)
-CLASS_WEIGHTS = {"stones": 1.0, "normal": 6.9}
+# dataset is ~1:1 balanced (100 stones vs 94 normal) — equal loss weights
+CLASS_WEIGHTS = {"stones": 1.0, "normal": 1.0}
 
 
 # ── transforms ───────────────────────────────────────────────────────────────
@@ -30,6 +30,14 @@ def _pad_to_square(img: Image.Image) -> Image.Image:
     return canvas
 
 
+class AddGaussianNoise:
+    """Add Gaussian noise to a tensor after ToTensor/Normalize."""
+    def __init__(self, std: float = 0.02):
+        self.std = std
+    def __call__(self, tensor: torch.Tensor) -> torch.Tensor:
+        return tensor + torch.randn_like(tensor) * self.std
+
+
 def get_transforms(augment: bool = False) -> T.Compose:
     norm = T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     if augment:
@@ -38,10 +46,11 @@ def get_transforms(augment: bool = False) -> T.Compose:
             T.RandomHorizontalFlip(),
             T.RandomRotation(10),
             T.RandomResizedCrop(224, scale=(0.8, 1.0)),
-            T.ColorJitter(brightness=0.3, contrast=0.3),   # brightness/contrast only — images are grayscale
+            T.ColorJitter(brightness=0.3, contrast=0.3),
             T.GaussianBlur(kernel_size=3, sigma=(0.1, 1.0)),
             T.ToTensor(),
             norm,
+            AddGaussianNoise(std=0.02),
         ])
     return T.Compose([
         T.Lambda(_pad_to_square),

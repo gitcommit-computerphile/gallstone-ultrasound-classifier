@@ -36,7 +36,7 @@ from dataset import (
     make_patient_splits, make_crosssite_splits,
     make_sampler, get_transforms, loss_weights,
 )
-from evaluate import compute_metrics, print_results_table
+from evaluate import compute_metrics, find_optimal_threshold, print_results_table
 
 
 # ── models ───────────────────────────────────────────────────────────────────
@@ -173,8 +173,19 @@ def fit(
     if best_state is not None:
         model.load_state_dict(best_state)
 
+    # find optimal threshold from val set (sensitivity >= 0.90)
+    vl, vp = predict(model, val_ld, device)
+    opt_thresh = find_optimal_threshold(vl, vp, sens_target=0.90)
+
     tl, tp = predict(model, test_ld, device)
-    return model, compute_metrics(tl, tp)
+    metrics = compute_metrics(tl, tp)
+    metrics_opt = compute_metrics(tl, tp, threshold=opt_thresh)
+    metrics["opt_threshold"] = round(opt_thresh, 4)
+    metrics["opt_sens"]      = metrics_opt["sens"]
+    metrics["opt_spec"]      = metrics_opt["spec"]
+    metrics["opt_f1"]        = metrics_opt["f1"]
+    metrics["opt_acc"]       = metrics_opt["acc"]
+    return model, metrics
 
 
 # ── cross-site helpers ────────────────────────────────────────────────────────
@@ -229,7 +240,7 @@ def main():
     parser = argparse.ArgumentParser(description="Train gallstone classifier")
     parser.add_argument("--model",       choices=["efficientnet", "dinov2"], default="efficientnet")
     parser.add_argument("--data-root",   default=".", help="Path to gallstone_dataset/")
-    parser.add_argument("--epochs",      type=int,   default=30)
+    parser.add_argument("--epochs",      type=int,   default=50)
     parser.add_argument("--lr",          type=float, default=1e-3)
     parser.add_argument("--batch-size",  type=int,   default=16)
     parser.add_argument("--num-workers", type=int,   default=2,
