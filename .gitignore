@@ -1,17 +1,9 @@
 # data directories
-dataset/
-ultrasound/
-reports/
-processed/
-stage1/
-stage2/
-stage3/
-new_dataset_12_july/
-unique_sizes/
-fan_masks/
 
-# manifest and annotations (contain PHI)
+new_dataset_12_july/
+
 manifest.csv
+
 README.md
 Unique Image Outlines*.json
 
