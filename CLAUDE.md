@@ -14,7 +14,7 @@ A curated medical imaging dataset for binary gallstone classification (stones vs
 |--------|---------|
 | `patient_id` | use this for train/val/test splitting — never split by filename |
 | `label` | `stones` / `normal` / `sludge` / `unknown` |
-| `gb_view` | `gb` / `gb_dual` / `other` / `uncertain` — only `gb` and `gb_dual` are in `processed/` |
+| `gb_view` | `gb` / `gb_dual` / `na` / `other` / `uncertain` — only `gb` (89) and `gb_dual` (117) reach `processed/`; `na` (52) are report photos, `other` (28) are non-GB organs, `uncertain` (4) unresolved |
 | `processed_relpath` | path to the cleaned PNG crop (blank if frame was excluded) |
 | `is_duplicate` / `dup_of` | near-identical frames flagged by perceptual hash; drop from val/test, keep in train |
 | `finding_summary` | raw text from the radiology report (Gulab Devi only) |
@@ -40,7 +40,9 @@ Every frame has PHI burned in (patient name, MRN, date). Method: grayscale thres
 **Limitation:** in-fan measurement calipers survive this step — they sit inside the fan boundary and can't be removed by cropping. Fixed in Stages 1–2.
 
 ### 0.3 — De-duplication
-DCT-based perceptual hash (32×32 → 8×8 DCT, 64-bit) computed per frame. Within each patient, frames within Hamming distance ≤ 6 are flagged as near-duplicates (`is_duplicate = yes`, `dup_of` names the kept twin). **Flagged, not deleted** — 21 duplicates, all in the stones class. Result: 86 unique GB frames.
+DCT-based perceptual hash (32×32 → 8×8 DCT, 64-bit) computed per frame. Within each patient, frames within Hamming distance ≤ 6 are flagged as near-duplicates (`is_duplicate = yes`, `dup_of` names the kept twin). **Flagged, not deleted** — 21 duplicates in the original pass, all stones. Result: 86 unique GB frames.
+
+**Current duplicate counts (post-2026-07-12 ingestion):** 37 flagged overall — 24 stones, 11 normal, 2 unknown. Within the binary set: 35 of 194 frames flagged, leaving 159 non-duplicate. The "all in the stones class" statement applies only to the original 139-frame pass.
 
 **Stage 0 counts:**
 
@@ -69,7 +71,10 @@ The site confound persists but is reduced on the stones side: Chughtai now contr
 - `stage2/` = calipers inpainted, text strips removed (intermediate, kept for reference).
 - `stage1/` = Chughtai text strips removed only (intermediate, kept for reference).
 - `processed/` = Stage 0 output, untouched (kept for reference).
-- **Do not train on `ultrasound/`** — raw BMPs/TIFs that include kidney/liver/other-organ frames and burned-in PHI.
+- **Do not train on `ultrasound/`** — raw BMPs/TIFs (139 files), renamed and label-sorted but otherwise unprocessed: includes kidney/liver/other-organ frames and burned-in PHI.
+- `dataset/` = the original donated dumps exactly as received from both hospitals (191 files), the target of `original_relpath`. Never read by any script; kept as the ground-truth archive. Contains PHI in both images and folder names.
+
+**Archive gap:** `dataset/` covers only the original donation. The 99 Chughtai frames ingested on 2026-07-12 came via `new_dataset_12_july/`, which `ingest_new_dataset.py` cropped straight into `processed/` without archiving the originals. That dump is gone, so for those 99 frames the earliest surviving copy is the already-cropped PNG. Stage 0 cannot be re-run differently on them.
 - **Binary task filter**: `label IN ('stones', 'normal')` → 194 frames, 136 patients (159 non-duplicate).
 - `sludge` and `unknown` are excluded from binary classification by default.
 
@@ -108,7 +113,7 @@ Apply augmentation only to `stage3/` PNGs at training time (never to val/test).
 **Avoid:**
 - Vertical flip — acoustic shadow (dark cone below a stone) is a primary diagnostic cue; flipping puts it above the stone, which is physically impossible
 - Large rotations (>15°) — introduces black corners from the fan crop boundary
-- Color jitter / channel operations — images are grayscale
+- Color jitter / channel operations — the images carry only a uniform machine tint (see preprocessing section), no diagnostic colour information; perturbing channels adds noise without adding realism
 
 **Class imbalance:** after the 2026-07-12 ingestion the dataset is near-balanced (100 stones vs 94 normal ≈ 1.06:1). Standard uniform augmentation and equal loss weighting are appropriate. The old 6.9:1 ratio and the heavy per-class augmentation strategy no longer apply — do not use `class_weight = {stones: 1, normal: 6.9}` with this dataset.
 
@@ -130,9 +135,22 @@ transforms.Compose([
 
 **Why 224×224:** Standard input size for pretrained ImageNet models (ResNet, EfficientNet). Using a different size requires re-learning spatial weights from scratch.
 
-**Why keep RGB, not convert to grayscale:** Images are stored as `Format24bppRgb` (3 channels) with R=G=B — grayscale data in an RGB container. Pretrained models expect 3 channels; keeping them as-is allows full use of pretrained weights. Converting to 1-channel grayscale would require reinitializing the first conv layer, losing pretrained benefit.
+**Why keep RGB, not convert to grayscale:** Pretrained models expect 3 channels; keeping images as-is allows full use of pretrained weights. Converting to 1-channel grayscale would require reinitializing the first conv layer — the most transferable layer in the network, holding the universal edge/texture detectors — and relearning it from 194 frames. No benefit to offset that cost.
 
-**Why ImageNet normalization:** Pretrained weights were learned with inputs normalized to these stats. Using them keeps activations in the expected range. Since all 3 channels are identical (grayscale), channel stats will be the same — the approximation still works in practice. Alternative: compute mean/std from the training split only for dataset-specific normalization, but never from the full dataset (leaks val/test distribution).
+**⚠️ Correction — the images are NOT R=G=B.** An earlier version of this file claimed they were "grayscale data in an RGB container". Verified false: sampling 60 images from each of `processed/`, `stage1/`, `stage2/`, `stage3/` found **zero** pure-grey images at any stage. A representative in-fan pixel reads `R=107 G=113 B=126`. The machines apply a consistent blue tint, averaging **B ≈ R + 11** across all 194 binary frames.
+
+The tint is **not** a leakage risk — it is near-identical across both hospitals and both classes:
+
+| group | mean (B − R) |
+|---|---:|
+| Chughtai | 11.65 |
+| Gulab Devi | 11.17 |
+| normal | 11.83 |
+| stones | 11.08 |
+
+This makes keeping 3 channels *more* correct than the original reasoning suggested — there is genuine (if diagnostically meaningless) colour data that a grayscale conversion would discard. Do not "optimise" these images to 1-channel.
+
+**Why ImageNet normalization:** Pretrained weights were learned with inputs normalized to these stats. Using them keeps activations in the expected range. Note that because the three channel means/stds differ slightly, an identical input value emerges as three different numbers — e.g. `0.4196` becomes `R=-0.2856, G=-0.1625, B=+0.0605`. This is expected, applied uniformly to every image, and introduces no site or class bias. Alternative: compute mean/std from the training split only for dataset-specific normalization, but never from the full dataset (leaks val/test distribution).
 
 **Note on 28 unique image sizes:** Every image in `processed/` has a different size due to per-frame fan crop bounding boxes. Padding + resize handles this automatically.
 
@@ -160,7 +178,7 @@ Run via `strip_chughtai_overlay.py` — outputs to `stage1/` (non-destructive, `
 
 **Remaining after crop:** `GB` organ label and depth numbers partially inside the fan boundary — removed by Fix 2 inpainting. `T` marker in corners — removed by Fix 3 fan masking.
 
-**Why this matters:** Chughtai = 8/12 normal frames. The machine parameter strip is a site confound signal — the model can learn "right-column text = normal" without looking at anatomy.
+**Why this matters:** Chughtai supplies 90 of the 94 normal frames (96%). The machine parameter strip is a site confound signal — the model can learn "right-column text = normal" without looking at anatomy.
 
 ### Fix 2 — Caliper / text overlay removal (inpainting) ✓ done
 
@@ -170,7 +188,7 @@ Removed via OpenCV HSV threshold + TELEA inpainting on **all frames** (not just 
 
 Run via `remove_calipers.py` — reads from `stage1/`, outputs to `stage2/` (non-destructive).
 
-**If results look suspicious after training** (model not generalising): fall back to manual masking — draw masks over calipers for all 83 stone frames and re-run inpainting.
+**If results look suspicious after training** (model not generalising): fall back to manual masking — draw masks over calipers for all 100 stone frames and re-run inpainting.
 
 ### Fix 3 — Fan masking ✓ done
 
@@ -210,13 +228,15 @@ Three files implement the full pipeline:
 
 Key flags: `--epochs` (default 50), `--lr` (default 1e-3), `--batch-size` (default 16), `--seed` (default 42), `--num-workers` (set to 0 on Windows if DataLoader errors).
 
-**Known issue — Windows path separators in manifest.csv:** `processed_relpath` values use `\` (e.g. `processed\normal\ch_adnan_03.png`). On Linux/Colab, `Path(...).relative_to("processed")` fails. Fix: call `.replace("\\", "/")` on the relpath string before passing to `Path`. Both occurrences in `dataset.py` (file-exists check and `__getitem__`) need this fix.
+**Windows path separators in manifest.csv — fixed in `dataset.py`, but watch for it elsewhere:** most `processed_relpath` values use `\` (e.g. `processed\normal\ch_adnan_03.png`), while rows written by `ingest_new_dataset.py` use `/`. The file contains a mix. On Linux/Colab, `Path(...).relative_to("processed")` fails on backslashes.
+
+`dataset.py` already handles this at both sites (`dataset.py:77` in `__getitem__`, `dataset.py:96` in the file-exists check) via `.replace("\\", "/")`. **Any new script reading path columns from the manifest needs the same guard.**
 
 ## Model strategy
 
 194 frames exist (159 non-duplicate). Overfitting is still the primary risk — do not train from scratch.
 
-**The core idea:** use a large pretrained model as a frozen feature extractor. Only the small classifier head trains. This way, the backbone's weights (learned from millions of images) stay intact, and there are very few parameters left to overfit on 95 frames.
+**The core idea:** use a large pretrained model as a frozen feature extractor. Only the small classifier head trains. This way, the backbone's weights (learned from millions of images) stay intact, and there are very few parameters left to overfit on 194 frames.
 
 **Step 1 — Baseline: EfficientNet-B0**
 - Freeze the entire backbone, train only the final classification head
@@ -269,9 +289,11 @@ The cross-site columns are what reveal whether the model generalised to anatomy 
 
 1. **Patient-level splits** — `patient_id` must not appear in more than one of train/val/test. Some names recur across dates (e.g. two "Abdullah", two "Panzi").
 2. **Caliper leakage** — addressed in `stage2/` via OpenCV inpainting. Verify post-training with GradCAM — if activations fire on caliper locations, fall back to manual masking.
-3. **Class imbalance** — 100 stones vs 94 normal (≈1.06:1 after 2026-07-12 ingestion). No special rebalancing needed. If retraining on the original smaller dataset, use `class_weight ≈ {stones: 1, normal: 6.9}`.
+3. **Class imbalance** — 100 stones vs 94 normal (≈1.06:1 after 2026-07-12 ingestion). No special rebalancing needed; `CLASS_WEIGHTS` in `dataset.py` is `{stones: 1.0, normal: 1.0}`. **Do not reintroduce the 6.9 weight** — leaving it in place after the dataset rebalanced was the single largest measured error in this project, suppressing mixed-split sensitivity to 0.286. Removing it raised sensitivity to 0.786 at the same threshold. The 6.9 figure applies only to the original 83:12 dataset, which is no longer in use.
 4. **Site confound** — see site distribution table above. Cross-site validation splits are mandatory, not optional.
-5. **PHI** — `ultrasound/`, `reports/`, and `manifest.csv` contain patient names, MRNs, dates. Do not share externally without de-identification. All are gitignored.
+5. **PHI** — `dataset/`, `ultrasound/`, `reports/`, and `manifest.csv` contain patient names, MRNs, and dates. `dataset/` additionally carries patient names in its **folder names**. Do not share externally without de-identification. All are gitignored (verified against `.gitignore`).
+
+   Safe to share: `stage3/` (fan-masked, all burned-in text removed), plus the methodology docs `Data_Pipeline_Explained.md` and `Open_Source_Datasets.md`, which contain no patient identifiers.
 
 ## File naming convention
 
